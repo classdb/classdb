@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	processName = "VASEDB"
+	processName = "WIREDKV"
 )
 
 var (
@@ -20,7 +20,7 @@ var (
 	warnColor   = color.New(color.Bold, color.FgYellow)
 	infoColor   = color.New(color.Bold, color.FgGreen)
 	redColor    = color.New(color.Bold, color.FgRed)
-	debugColor  = color.New(color.Bold, color.FgHiMagenta)
+	debugColor  = color.New(color.Bold, color.FgBlue)
 	errorPrefix = redColor.Sprintf("[ERROR]\t")
 	warnPrefix  = warnColor.Sprintf("[WARN]\t")
 	infoPrefix  = infoColor.Sprintf("[INFO]\t")

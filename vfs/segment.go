@@ -3,8 +3,9 @@ package vfs
 import (
 	"errors"
 	"fmt"
+	"time"
 
-	"github.com/auula/vasedb/types"
+	"github.com/auula/wiredkv/types"
 )
 
 type Kind int8
@@ -20,9 +21,15 @@ const (
 	Unknown
 )
 
+// | DEL 1 | KIND 1 | EAT 8 | CAT 8 | KLEN 8 | VLEN 8 | KEY ? | VALUE ? | CRC32 4 |
 type Segment struct {
-	kind Kind
-	data []byte
+	Tombstone int8
+	Type      Kind
+	ExpiredAt uint64
+	CreatedAt uint64
+	KeySize   uint32
+	ValueSize uint32
+	data      []byte
 }
 
 type Serializable interface {
@@ -38,26 +45,28 @@ func NewSegment(data Serializable) (*Segment, error) {
 
 	// 如果类型不匹配，则返回错误
 	return &Segment{
-		kind: kind,
+		Type: kind,
 		data: data.ToBytes(),
 	}, nil
 }
 
 func (s *Segment) Kind() Kind {
-	return s.kind
+	return s.Type
 }
 
 func (s *Segment) Size() int {
 	return len(s.data)
 }
 
-func (s *Segment) ToBytes() []byte {
-
+func (s *Segment) ToLittleEndian() []byte {
+	// 这里直接初始化为小端磁盘存储格式
+	// 日志记录到附加信息序列化
+	// 上层的 lfs 只需要写入对于的记录到文件中就可以
 	return []byte{}
 }
 
 func (s *Segment) ToSet() *types.Set {
-	if s.kind != Set {
+	if s.Type != Set {
 		return nil
 	}
 	// 假设您的数据是 JSON 或某种结构体，可以进行反序列化
@@ -90,8 +99,12 @@ func (s *Segment) ToNumber() *types.Number {
 	return nil
 }
 
-func (s *Segment) TTL() {
-
+func (s *Segment) TTL() int64 {
+	now := uint64(time.Now().Unix())
+	if s.ExpiredAt > 0 && s.ExpiredAt > now {
+		return int64(s.ExpiredAt - now)
+	}
+	return -1
 }
 
 // 将类型映射为 Kind 的辅助函数

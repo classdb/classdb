@@ -2,9 +2,9 @@
 
 <img align="right" src="https://img.ibyte.me/0sd9vd.png" alt="vasedb" width="120" height="120" />
 
-# VaseDB
+# WiredKV
 
-VaseDB is a NoSQL that supports multiple data types and transactions.
+WiredKV is a NoSQL that supports multiple data types based on Log-structured file system.
 
 ---
 

@@ -1,4 +1,4 @@
-module github.com/auula/vasedb
+module github.com/auula/wiredkv
 
 go 1.20
 

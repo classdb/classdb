@@ -10,8 +10,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/auula/vasedb/clog"
-	"github.com/auula/vasedb/vfs"
+	"github.com/auula/wiredkv/clog"
+	"github.com/auula/wiredkv/vfs"
 )
 
 var (
@@ -127,19 +127,20 @@ func (hs *HttpServer) Shutdown() error {
 		return errors.New("http server not started")
 	}
 
-	// 再关闭文件存储系统
-	if storage != nil {
-		err := storage.CloseFS()
-		if err != nil {
-			return err
-		}
-	}
-
+	// 先关闭 http 服务器停止接受数据请求
 	err := hs.s.Shutdown(context.Background())
 	if err != nil && err != http.ErrServerClosed {
 		return err
 	}
 	atomic.StoreInt32(&hs.closed, 0)
+
+	// 再关闭文件存储系统
+	if storage != nil {
+		err := storage.CloseFS()
+		if err != nil {
+			return fmt.Errorf("failed to shutdown the storage engine: %w", err)
+		}
+	}
 
 	return nil
 }

@@ -5,12 +5,12 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/auula/vasedb/clog"
-	"github.com/auula/vasedb/types"
+	"github.com/auula/wiredkv/clog"
+	"github.com/auula/wiredkv/types"
 	"github.com/gorilla/mux"
 )
 
-const version = "vasedb/0.1.1"
+const version = "wiredkv/0.1.1"
 
 var (
 	root         *mux.Router

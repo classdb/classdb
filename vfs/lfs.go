@@ -17,7 +17,16 @@ import (
 	"sync"
 	"time"
 
-	"github.com/auula/vasedb/utils"
+	"github.com/auula/wiredkv/utils"
+)
+
+const RWCA = os.O_RDWR | os.O_CREATE | os.O_APPEND
+
+const (
+	_  = 1 << (10 * iota) // skip iota = 0
+	KB                    // 2^10 = 1024
+	MB                    // 2^20 = 1048576
+	GB                    // 2^30 = 1073741824
 )
 
 var (
@@ -25,27 +34,25 @@ var (
 	indexShard       = 5
 	instance         *LogStructuredFS
 	fsPerm           = fs.FileMode(0755)
-	fileExtension    = ".vsdb"
-	indexFileName    = "idx.vsdb"
-	regionThreshold  = int64(100 << 20) // 100MB
+	fileExtension    = ".wdb"
+	indexFileName    = "index.wdb"
+	regionThreshold  = int64(1 * GB) // 1GB
 	dataFileMetadata = []byte{0xDB, 0x0, 0x0, 0x1}
 )
 
-const RWCA = os.O_RDWR | os.O_CREATE | os.O_APPEND
-
 type Options struct {
-	Path   string
-	FsPerm os.FileMode
+	Path      string
+	FsPerm    os.FileMode
+	Threshold uint8 // 这个的大小会影响到垃圾回收执行的时间
 }
 
 // INode represents a file system node with metadata.
-// | CRC32 4 | IDX 8 | SID 8  | OFS 8 | EA 8 | CA 8 | OF 4 |
 type INode struct {
 	RegionID  uint64 // Unique identifier for the region
-	Offset    uint64 // Offset within the file
+	Position  uint64 // Position within the file
 	Length    uint32 // Data record length
-	ExpiredAt int64  // Expiration time of the INode (UNIX timestamp in seconds)
-	CreatedAt int64  // Creation time of the INode (UNIX timestamp in seconds)
+	ExpiredAt uint64 // Expiration time of the INode (UNIX timestamp in seconds)
+	CreatedAt uint64 // Creation time of the INode (UNIX timestamp in seconds)
 }
 
 type indexMap struct {
@@ -72,17 +79,19 @@ func (lfs *LogStructuredFS) getShardIndex(inum uint64) *indexMap {
 }
 
 // 使用 `getShardIndex` 获取分片，并加锁进行操作
-func (lfs *LogStructuredFS) AddSegment(inum uint64, segment Serializable, ttl int64) {
+func (lfs *LogStructuredFS) AddSegment(inum uint64, seg Segment, ttl uint64) {
 	shard := lfs.getShardIndex(inum)
 	inode := &INode{
-		RegionID:  lfs.regionID,
-		Offset:    lfs.offset,
+		RegionID: lfs.regionID,
+		Position: lfs.offset,
+		// Length 是通过 segment 计算出来的
 		Length:    0,
-		CreatedAt: time.Now().Unix(),
-		ExpiredAt: -1,
+		CreatedAt: uint64(time.Now().Unix()),
+		ExpiredAt: 0,
 	}
+
 	if ttl > 0 {
-		inode.ExpiredAt = time.Now().Add(time.Second * time.Duration(ttl)).Unix()
+		inode.ExpiredAt = uint64(time.Now().Add(time.Second * time.Duration(ttl)).Unix())
 	}
 
 	shard.mu.Lock()
@@ -109,7 +118,7 @@ func HashSum64(key string) uint64 {
 	return h.Sum64()
 }
 
-func (lfs *LogStructuredFS) ChangeReigons() error {
+func (lfs *LogStructuredFS) ChangeRegions() error {
 	lfs.mu.Lock()
 	defer lfs.mu.Unlock()
 
@@ -124,7 +133,7 @@ func (lfs *LogStructuredFS) ChangeReigons() error {
 	}
 	lfs.regions[lfs.regionID] = file
 
-	err = lfs.createActiveReigon()
+	err = lfs.createActiveRegion()
 	if err != nil {
 		return fmt.Errorf("failed to chanage active file: %w", err)
 	}
@@ -132,7 +141,7 @@ func (lfs *LogStructuredFS) ChangeReigons() error {
 	return nil
 }
 
-func (lfs *LogStructuredFS) createActiveReigon() error {
+func (lfs *LogStructuredFS) createActiveRegion() error {
 	lfs.mu.Lock()
 	defer lfs.mu.Unlock()
 	lfs.regionID += 1
@@ -141,12 +150,12 @@ func (lfs *LogStructuredFS) createActiveReigon() error {
 		return fmt.Errorf("failed to new data file name: %w", err)
 	}
 
-	activeFile, err := os.OpenFile(filepath.Join(lfs.directory, fileName), RWCA, fsPerm)
+	active, err := os.OpenFile(filepath.Join(lfs.directory, fileName), RWCA, fsPerm)
 	if err != nil {
 		return fmt.Errorf("failed to create active file: %w", err)
 	}
 
-	n, err := activeFile.Write(dataFileMetadata)
+	n, err := active.Write(dataFileMetadata)
 	if err != nil {
 		return fmt.Errorf("failed to write data file metadata: %w", err)
 	}
@@ -155,7 +164,7 @@ func (lfs *LogStructuredFS) createActiveReigon() error {
 		return errors.New("failed to new file metadata write")
 	}
 
-	lfs.active = activeFile
+	lfs.active = active
 	lfs.offset = uint64(len(dataFileMetadata))
 
 	return nil
@@ -171,12 +180,12 @@ func (lfs *LogStructuredFS) recoverRegions() error {
 
 	if len(files) <= 0 {
 		// 它这个错误设计和 JVM 异常相比很垃圾
-		err := lfs.createActiveReigon()
+		err := lfs.createActiveRegion()
 		if err != nil {
 			return err
 		}
 		// 可以直接这么写，但是会丢弃错误处理上下文
-		// return lfs.createActiveReigon()
+		// return lfs.createActiveRegion()
 		return nil
 	}
 
@@ -209,7 +218,7 @@ func (lfs *LogStructuredFS) recoverRegions() error {
 	// 如果最大那个 region 文件没有达到阀值就不用创建新文件，如果大于就创建新的文件
 	activeRegion, ok := lfs.regions[lfs.regionID]
 	if !ok {
-		return fmt.Errorf("region file not found for regionID: %d", lfs.regionID)
+		return fmt.Errorf("region file not found for region id: %d", lfs.regionID)
 	}
 	stat, err := activeRegion.Stat()
 	if err != nil {
@@ -217,7 +226,7 @@ func (lfs *LogStructuredFS) recoverRegions() error {
 	}
 
 	if stat.Size() >= regionThreshold {
-		return lfs.createActiveReigon()
+		return lfs.createActiveRegion()
 	} else {
 		offset, err := activeRegion.Seek(0, io.SeekEnd)
 		if err != nil {
@@ -230,15 +239,15 @@ func (lfs *LogStructuredFS) recoverRegions() error {
 	return nil
 }
 
+// recoveryIndex 会对磁盘上的数据文件执行恢复索引操作，步骤如下：
+// 读取索引文件快照文件，从快照文件里面恢复索引
+// 不同于 bitcask 对 hint 文件是在 compressor 过程中生成
+// bitcask 中 hint 文件是在压缩过程中生成 hint 快照
+// 并不能代表全部即时内存索引状态
+// vasedb 则完全设计了不同的方案，如果是 close 正常关闭的就会生成 index 文件
+// 如果数据文件有 index 文件则直接从 index 文件中恢复
+// 没有就在启动的全局扫描数据文件重新构建索引文件
 func (lfs *LogStructuredFS) recoveryIndex() error {
-	// 读取索引文件快照文件，从快照文件里面恢复索引
-	// 不同于 bitcask 对 hint 文件是在 compressor 过程中生成
-	// bitcask 中 hint 文件是在压缩过程中生成 hint 快照
-	// 并不能代表全部即时内存索引状态
-	// vasedb 则完全设计了不同的方案，如果是 close 正常关闭的就会生成 index 文件
-	// 如果数据文件有 index 文件则直接从 index 文件中恢复
-	// 没有就在启动的全局扫描数据文件重新构建索引文件
-
 	lfs.mu.Lock()
 	defer lfs.mu.Unlock()
 	// 构造完整的文件路径
@@ -260,7 +269,10 @@ func (lfs *LogStructuredFS) recoveryIndex() error {
 	}
 
 	// 如果不存在索引文件就从 regions 文件全局扫描恢复
-	err := crashRecoveryAllIndex(lfs.directory, lfs.indexs)
+	// 如果数据文件非常大，而且文件非常多，恢复多时间就越长
+	// 如果垃圾回收越频繁，你数据文件就变小，启动时间就越快
+	// 但是如果垃圾回收越频繁，可能会影响到整体数据读取写性能
+	err := crashRecoveryAllIndex(lfs.regions, lfs.indexs)
 	if err != nil {
 		return fmt.Errorf("failed to crash recovery index: %w", err)
 	}
@@ -274,6 +286,9 @@ func OpenFS(opt *Options) (*LogStructuredFS, error) {
 		if instance != nil {
 			return
 		}
+
+		// single region max size = 255GB
+		regionThreshold = int64(opt.Threshold) * GB
 
 		err := checkFileSystem(opt.Path)
 		if err != nil {
@@ -293,7 +308,7 @@ func OpenFS(opt *Options) (*LogStructuredFS, error) {
 		for i := 0; i < indexShard; i++ {
 			instance.indexs[i] = &indexMap{
 				mu:    sync.RWMutex{},
-				index: make(map[uint64]*INode),
+				index: make(map[uint64]*INode, 100000),
 			}
 		}
 
@@ -339,6 +354,10 @@ func (lfs *LogStructuredFS) CloseFS() error {
 	return lfs.ExportSnapshotIndex()
 }
 
+// ExportSnapshotIndex 是正常程序退出是所做的操作，导出内存索引快照到磁盘文件
+// 当前的设计方案对于内存资源较少的系统有限制，
+// 例如 RAM 512 MB < 1GB，如果 1GB 快照不能全部序列化到磁盘上，
+// 映射大文件到内存可能不是一个好的选择，因为它会占用大量的虚拟内存空间，会出现 swap 交换内存页。
 func (lfs *LogStructuredFS) ExportSnapshotIndex() error {
 	lfs.mu.Lock()
 	defer lfs.mu.Unlock()
@@ -412,7 +431,7 @@ func recoveryIndex(fd *os.File, indexs []*indexMap) error {
 		defer wg.Done()
 		defer close(nqueue)
 
-		for offset < finfo.Size() {
+		for offset < finfo.Size() && len(equeue) == 0 {
 			bytes, err := trans.ReadAt(fd, offset, 48)
 			if err != nil {
 				equeue <- fmt.Errorf("failed to read index node: %w", err)
@@ -438,11 +457,13 @@ func recoveryIndex(fd *os.File, indexs []*indexMap) error {
 		for node := range nqueue {
 			imap := indexs[node.inum%uint64(indexShard)]
 			if imap != nil {
-				// 确保对共享资源访问的线程安全
-				imap.mu.Lock()
-				imap.index[node.inode.RegionID] = node.inode
-				imap.mu.Unlock()
+				imap.index[node.inum] = node.inode
 			} else {
+				// 这里对应着 for 循环的 len(equeue) == 0 条件
+				// 防止消费者 goroutine 发生了错误已经停止了
+				// 但是生产者 goroutine 还在读取反序列化索引
+				// 导致不能立即执行 defer wg.Done() 做无意义的工作
+				// 目的是为尽快恢复阻塞的 wg.Wait() 执行主 goroutine 返回
 				equeue <- errors.New("no corresponding index shard")
 				return
 			}
@@ -463,7 +484,73 @@ func recoveryIndex(fd *os.File, indexs []*indexMap) error {
 	}
 }
 
-func crashRecoveryAllIndex(_ string, _ []*indexMap) error {
+// crashRecoveryAllIndex 会对 regions 文件集合进行解析恢复内存索引，步骤如下：
+// 1. 崩溃恢复逻辑，扫描所有的数据文件
+// 2. 读取每条数据记录的前 26 字节 MetaInfo
+// 3. 对这些记录进行重放，并且查看 DEL 值是否为 1
+// 4. 如果是 1 则对内存的索引进行删除
+// 5. 否则直接将磁盘元数据重构建为索引
+// | DEL 1 | KIND 1 | EAT 8 | CAT 8 | KLEN 4 | VLEN 4 | KEY ? | VALUE ? | CRC32 4 |
+func crashRecoveryAllIndex(regions map[uint64]*os.File, indexs []*indexMap) error {
+	var regionIds []uint64
+	for v := range regions {
+		regionIds = append(regionIds, v)
+	}
+
+	// 对 regionIds 切片从小到大排序
+	sort.Slice(regionIds, func(i, j int) bool {
+		return regionIds[i] < regionIds[j]
+	})
+
+	// 3. 遍历每个数据文件（region）
+	for _, regionId := range regionIds {
+		fd, ok := regions[uint64(regionId)]
+		if !ok {
+			return fmt.Errorf("data file does not exist regions id: %d", regionId)
+		}
+
+		finfo, err := fd.Stat()
+		if err != nil {
+			return err
+		}
+
+		offset := uint64(len(dataFileMetadata))
+
+		for offset < uint64(finfo.Size()) {
+			inum, segment, err := readSegment(fd, offset, 26)
+			if err != nil {
+				return fmt.Errorf("failed to parse data file segment: %w", err)
+			}
+
+			imap := indexs[inum%uint64(indexShard)]
+			if imap != nil {
+				// 如果是一条删除操作的记录，就将该记录对应索引删除
+				if segment.Tombstone == 1 {
+					delete(imap.index, inum)
+					continue
+				}
+
+				// 计算一整块记录的大小，+4 CRC 校验码占用 4 个字节
+				size := 26 + segment.KeySize + segment.ValueSize + 4
+
+				// 否则继续往下执行，构建重新 inode 索引
+				imap.index[inum] = &INode{
+					RegionID:  regionId,
+					Position:  offset,
+					Length:    size,
+					CreatedAt: segment.CreatedAt,
+					ExpiredAt: segment.ExpiredAt,
+				}
+
+				offset += uint64(size)
+			} else {
+				// 找不到索引就抛出异常
+				return errors.New("no corresponding index shard")
+			}
+		}
+
+	}
+
 	return nil
 }
 
@@ -533,6 +620,85 @@ func checkFileSystem(path string) error {
 	return nil
 }
 
+// | DEL 1 | KIND 1 | EAT 8 | CAT 8 | KLEN 4 | VLEN 4 | KEY ? | VALUE ? | CRC32 4 |
+func readSegment(fd *os.File, offset uint64, bufsize int64) (uint64, *Segment, error) {
+	// 数据转换器
+	trans := NewTransformer()
+	// 从指定的 offset 读取数据
+	buf, err := trans.ReadAt(fd, int64(offset), bufsize)
+	if err != nil {
+		return 0, nil, err
+	}
+
+	// 初始化 Segment 结构
+	var seg Segment
+	readOffset := 0
+
+	// 1. 解析 Tombstone (1 字节)
+	seg.Tombstone = int8(buf[readOffset])
+	readOffset += 1
+
+	// 2. 解析 Type (1 字节)
+	seg.Type = Kind(buf[readOffset])
+	readOffset += 1
+
+	// 3. 解析 ExpiredAt (8 字节，小端格式)
+	seg.ExpiredAt = binary.LittleEndian.Uint64(buf[readOffset : readOffset+8])
+	readOffset += 8
+
+	// 4. 解析 CreatedAt (8 字节，小端格式)
+	seg.CreatedAt = binary.LittleEndian.Uint64(buf[readOffset : readOffset+8])
+	readOffset += 8
+
+	// 5. 解析 KeySize (4 字节，小端格式)
+	seg.KeySize = binary.LittleEndian.Uint32(buf[readOffset : readOffset+4])
+	readOffset += 4
+
+	// 7. 解析 ValueSize (4 字节，小端格式)
+	seg.ValueSize = binary.LittleEndian.Uint32(buf[readOffset : readOffset+4])
+	readOffset += 4
+
+	// 8. 原始 buf 不够用存储 key 的值，从指定的 offset 读取 key 实际的数据
+	keybuf, err := trans.ReadAt(fd, int64(offset)+int64(readOffset), int64(seg.KeySize))
+	if err != nil {
+		return 0, nil, fmt.Errorf("failed to parse key in segment: %w", err)
+	}
+
+	readOffset += int(seg.KeySize)
+
+	// 10. 原始 buf 不够用存储 value 的值，从指定的 offset 读取 value 实际的数据
+	valuebuf, err := trans.ReadAt(fd, int64(offset)+int64(readOffset), int64(seg.ValueSize))
+	if err != nil {
+		return 0, nil, fmt.Errorf("failed to parse value in segment: %w", err)
+	}
+
+	readOffset += int(seg.ValueSize)
+
+	// 12. 读取 checksum (4 字节)
+	checksumBuf, err := trans.ReadAt(fd, int64(offset)+int64(readOffset), 4)
+	if err != nil {
+		return 0, nil, fmt.Errorf("failed to read checksum in segment: %w", err)
+	}
+
+	// 将 checksum 从字节数组转换为 uint32
+	checksum := binary.LittleEndian.Uint32(checksumBuf)
+
+	// 13. 将 key 和 value 数据拼接后计算 CRC32 校验和
+	buf = append(buf, keybuf...)
+	buf = append(buf, valuebuf...)
+
+	// 14. 校验 checksum 是否一致
+	if checksum != crc32.ChecksumIEEE(buf) {
+		return 0, nil, fmt.Errorf("failed to crc32 checksum mismatch: %d", checksum)
+	}
+
+	// 15. 更新 Segment 数据字段为读取的 valuebuf
+	seg.data = valuebuf
+
+	// 16. 返回 inum 和 解析后的 Segment 以及 nil 错误
+	return HashSum64(string(keybuf)), &seg, nil
+}
+
 func generateFileName(regionID uint64) (string, error) {
 	fileName := fmt.Sprintf("%08d%s", regionID, fileExtension)
 	if len(fileName) == 8 && strings.HasPrefix(fileName, "0") {
@@ -562,6 +728,8 @@ func formatDataFileName(number uint64) string {
 	return fmt.Sprintf("%08d%s", number, fileExtension)
 }
 
+// serializedIndex 将索引进行序列化为可以恢复的文件快照记录格式：
+// | INUM 8 | RID 8  | POS 8 | LEN 4 | EAT 8 | CAT 8 | CRC32 4 |
 func serializedIndex(inum uint64, inode *INode) ([]byte, error) {
 	// 创建一个字节缓冲区
 	buf := new(bytes.Buffer)
@@ -569,7 +737,7 @@ func serializedIndex(inum uint64, inode *INode) ([]byte, error) {
 	// 按顺序写入各个字段
 	binary.Write(buf, binary.LittleEndian, inum)
 	binary.Write(buf, binary.LittleEndian, inode.RegionID)
-	binary.Write(buf, binary.LittleEndian, inode.Offset)
+	binary.Write(buf, binary.LittleEndian, inode.Position)
 	binary.Write(buf, binary.LittleEndian, inode.Length)
 	binary.Write(buf, binary.LittleEndian, inode.ExpiredAt)
 	binary.Write(buf, binary.LittleEndian, inode.CreatedAt)
@@ -584,6 +752,8 @@ func serializedIndex(inum uint64, inode *INode) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+// deserializedIndex 将索引文件快照恢复为内存结构体：
+// | INUM 8 | RID 8  | OFS 8 | LEN 4 | EAT 8 | CAT 8 | CRC32 4 |
 func deserializedIndex(data []byte) (uint64, *INode, error) {
 	buf := bytes.NewReader(data)
 	// 反序列化 inum
@@ -600,7 +770,7 @@ func deserializedIndex(data []byte) (uint64, *INode, error) {
 		return 0, nil, err
 	}
 
-	err = binary.Read(buf, binary.LittleEndian, &inode.Offset)
+	err = binary.Read(buf, binary.LittleEndian, &inode.Position)
 	if err != nil {
 		return 0, nil, err
 	}
