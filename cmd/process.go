@@ -147,6 +147,11 @@ func runServer() {
 		clog.Info("Region compression activated successfully")
 	}
 
+	if len(conf.Settings.AllowIP) > 0 {
+		hts.SetAllowIP(conf.Settings.AllowIP)
+		clog.Info("Setting whitelist IP successfully")
+	}
+
 	hts.SetupFS(fss)
 	clog.Info("File system setup completed successfully")
 
@@ -157,6 +162,7 @@ func runServer() {
 		}
 	}()
 
+	// 延迟输出正常休息，因为上面的 Startup 方法在正常情况下是一个阻塞方法
 	time.Sleep(500 * time.Millisecond)
 	clog.Infof("HTTP server started at http://%s:%d 🚀", hts.IPv4(), hts.Port())
 

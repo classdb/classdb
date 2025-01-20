@@ -88,6 +88,7 @@ func TestSavedAsConfig(t *testing.T) {
 		Compressor: Compressor{
 			Enable: false,
 		},
+		AllowIP: []string{"192.127.0.1", "192.127.0.2"},
 	}
 
 	_, err := os.Create(tmpDir + "/config.yaml")

@@ -14,3 +14,6 @@ encryptor:          # 是否开启静态数据加密功能
     secret: "your-static-data-secret"
 compressor:         # 是否开启静态数据压缩功能
     enable: false
+allowip:           # 白名单 IP 列表
+    - 192.168.31.1
+    - 192.168.31.2

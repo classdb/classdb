@@ -90,6 +90,10 @@ func (hs *HttpServer) SetupFS(fss *vfs.LogStructuredFS) {
 	storage = fss
 }
 
+func (hs *HttpServer) SetAllowIP(allowd []string) {
+	allowIPList = allowd
+}
+
 func (hs *HttpServer) Port() int {
 	return hs.port
 }

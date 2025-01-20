@@ -23,14 +23,13 @@ const (
 	DefaultConfigJSON = `
 	{
 		"port": 2468,
-		"mode": "std",
 		"path": "/tmp/wiredkv",
-		"auth": "Are we wide open to the world?",
-		"logpath": "/tmp/wiredkv/out.log",
 		"debug": false,
+		"logpath": "/tmp/wiredkv/out.log",
+		"auth": "Are we wide open to the world?",
 		"region": {
 			"enable": true,
-			"second": 15000,
+			"second": 18000,
 			"threshold": 3
 		},
 		"encryptor": {
@@ -39,7 +38,8 @@ const (
 		},
 		"compressor": {
 			"enable": false
-		}
+		},
+		"allow_ip": null
 	}
 `
 )
@@ -197,6 +197,7 @@ type ServerOptions struct {
 	Region     Region     `json:"region"`
 	Encryptor  Encryptor  `json:"encryptor"`
 	Compressor Compressor `json:"compressor"`
+	AllowIP    []string   `json:"allowip"`
 }
 
 type Region struct {
